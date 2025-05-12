@@ -1,0 +1,549 @@
+from flask import Flask, jsonify, request, render_template
+from flask_cors import CORS
+from pymongo import MongoClient
+import os
+from dotenv import load_dotenv
+from jose import jwt
+import datetime
+from tapipy.tapis import Tapis
+import logging
+import traceback
+import pandas as pd
+import datetime
+from bson.objectid import ObjectId
+import requests
+import numpy as np
+from sklearn.metrics.pairwise import pairwise_distances
+from flask_socketio import SocketIO, emit, join_room, leave_room
+import json
+import threading
+from sklearn import datasets
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+import time
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Load environment variables
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})  # Apply to all routes
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# MongoDB connection
+mongo_uri = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/digital_agriculture')
+client = MongoClient(mongo_uri)
+db = client.digital_agriculture
+messages_collection = db['messages']
+
+# TACC Configuration
+JWT_SECRET = '6554a9038d6a07bbf3cb17973c13ce2c5f24a71c247210b1f2a8d04cfb8a6907a102064629058d7d89ed4d03a5503fa485e3898346f3baeef1ed510268e680f65d6d7ccaed5ca755586702e55142e1c07e53f5b38b7055b4bb55a70baf0dcdc0d4150347041a1509fc7d12d705ffe4c8e9ff9cb8f9bba5ffd6129128b62e84de4e9087d21d342a10d87a53c59eec2323dcf3a3d2276d62793df37c5e96eacbabc44f1ce1930e7e8ceb97c88f83d75d4fdcb2cebda1ceea7b99294c6d0c4db8fa71d2295b7b73f80813a734447983d47f430d0dddbd90c5ff81a35b46cad10cde33901456e3fe6f7166152366693224a072d7182b40c38bbf04c3ccf76ff3b6db'  # Change this in production
+
+def create_jwt_token(username):
+    """Create a JWT token for the authenticated user"""
+    payload = {
+        'username': username,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=1)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+
+def send_request_to_train_local_model(user_id, updates_list, hyperparameters, lock):
+    try:
+        response = requests.post(f"http://digitalagriculturesandbox-farmer-server-1:5001/api/trainLocalModel", json={'userID': str(user_id), "hyperparameters": hyperparameters})
+        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+        data = response.json()
+        print(data['userID'], ' ', data['training_time'])
+        # print(f"Received update from Farmer Server for user {user_id}: {data}") #  too verbose
+        with lock:
+            updates_list.append(data)
+    except requests.exceptions.RequestException as e:
+        print(f"Error sending request to Farmer Server for user {user_id}: {e}")
+        # Consider adding error handling here, such as retrying the request
+        # or logging the error to a file.  For now, we'll just print to the console.
+        with lock:
+            updates_list.append(None) # Append None to keep the order correct.
+
+def aggregate_updates(updates):
+    if not updates:
+        return [], []  # Return empty lists if there are no updates
+
+    # Initialize lists to store the sum of weights and intercepts
+    sum_weights = np.zeros_like(np.array(updates[0]['weights']))
+    sum_intercepts = np.zeros_like(np.array(updates[0]['intercept']))
+    total_training_time = 0
+
+    # Sum the weights and intercepts from all updates
+    for update in updates:
+        sum_weights += np.array(update['weights'])
+        sum_intercepts += np.array(update['intercept'])
+        total_training_time += update['training_time']
+
+    print(f"Total training time on Farmer Server: {total_training_time:.4f} seconds")
+    # Average the weights and intercepts
+    aggregated_weights = (sum_weights / len(updates)).tolist()
+    aggregated_intercept = (sum_intercepts / len(updates)).tolist()
+
+    return aggregated_weights, aggregated_intercept
+
+def save_model(weights, intercept):
+    try:
+        with open('aggregated_model.txt', 'w') as f:
+            f.write(f"Weights: {weights}\n")
+            f.write(f"Intercept: {intercept}\n")
+        print("Aggregated model saved to aggregated_model.txt")
+    except Exception as e:
+        print(f"Error saving model: {e}")
+
+def start_training_process(collaborators, hyperparameters):
+    # data_received = request.get_json()  # Get the JSON data from the request body
+    # n_users = int(data_received.get('n'))
+    updates = []
+    threads = []
+    lock = threading.Lock() #  Use a lock for thread-safe access to the updates list.
+
+    print(f"Starting training for {len(collaborators)} users...")
+    start_time = time.time()
+
+    # Create and start a thread for each user.
+    for user_id in collaborators:
+        thread = threading.Thread(target=send_request_to_train_local_model, args=(user_id, updates, hyperparameters, lock))
+        threads.append(thread)
+        thread.start()
+
+    # Wait for all threads to complete.
+    for thread in threads:
+        thread.join()
+
+    end_time = time.time()
+    total_time = end_time - start_time
+    print(f"All training threads completed in {total_time:.4f} seconds.")
+    print(f"Received {len(updates)} updates from Farmer Server.")
+
+    # Check for any failed requests (None values in updates list)
+    if None in updates:
+        print("Warning: Some requests to Farmer Server failed.  Aggregation may be incomplete.")
+        #  Remove the None values before proceeding with aggregation
+        updates = [u for u in updates if u is not None]
+
+
+    # Aggregate the updates.
+    if hyperparameters['modelName'] == 'NN':
+        aggregated_weights = federated_averaging(updates)
+        # Save the aggregated model to a file.
+        save_model(aggregated_weights, None)
+    else:
+        aggregated_weights, aggregated_intercept = aggregate_updates(updates)
+        # Save the aggregated model to a file.
+        save_model(aggregated_weights, aggregated_intercept)
+    
+    print({'message': 'Training complete', 'total_time': total_time, 'num_updates': len(updates)}) # Return timing
+
+# Federated Averaging
+def federated_averaging(local_weights_list):
+    # Averaging the weights for each layer
+    global_weights = {}
+    for layer in local_weights_list[0].keys():
+        global_weights[layer] = torch.mean(torch.stack([w[layer] for w in local_weights_list]), dim=0)
+    return global_weights
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    try:
+        data = request.json
+        username = data.get('username')
+        password = data.get('password')
+
+        if not username or not password:
+            return jsonify({"status": "error", "message": "Username and password are required"}), 400
+
+        # Create Tapis client and authenticate
+        t = Tapis(
+            base_url="https://tacc.tapis.io",
+            username=username,
+            password=password
+        )
+
+        # Get tokens from Tapis
+        t.get_tokens()
+
+        if not t.access_token:
+            return jsonify({"status": "error", "message": "Authentication failed"}), 401
+
+        # Create JWT token for our application
+        token = create_jwt_token(username)
+        
+        # Extract token information
+        tapis_token_info = {
+            'access_token': t.access_token.access_token,
+            'expires_at': t.access_token.expires_at.isoformat(),
+            'jti': t.access_token.jti,
+            'original_ttl': t.access_token.original_ttl
+        }
+
+        # Store user session in MongoDB
+        db.sessions.update_one(
+            {"username": username},
+            {
+                "$set": {
+                    "username": username,
+                    "tapis_token": tapis_token_info,
+                    "last_login": datetime.datetime.utcnow()
+                }
+            },
+            upsert=True
+        )
+
+        return jsonify({
+            "status": "success",
+            "token": token,
+            "username": username,
+            "tapis_token": tapis_token_info
+        })
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/auth/verify', methods=['GET'])
+def verify_token():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+
+        token = auth_header.split(' ')[1]
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+
+        return jsonify({
+            "status": "success",
+            "username": payload['username'],
+            "tapis_token": session['tapis_token']
+        })
+
+    except jwt.ExpiredSignatureError:
+        return jsonify({"status": "error", "message": "Token expired"}), 401
+    except jwt.JWTError:
+        return jsonify({"status": "error", "message": "Invalid token"}), 401
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy", "service": "app-server"})
+
+
+@app.route('/api/get_similar_farmers', methods=['POST'])
+def get_similar_farmers():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+        
+        token = auth_header.split(' ')[1]
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        user_id = payload['username']
+        data = request.get_json()  # Get the JSON data from the request body
+        selected_DS_ID = data.get('selectedDataset')  # Extract selectedDataset
+        print("sad",selected_DS_ID)
+
+        response = None
+
+        try:
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+                }
+            response = requests.get("http://digitalagriculturesandbox-farmer-server-1:5001/api/load_datasets", headers=headers, params={'datasetId' : selected_DS_ID})
+            print("sad",response)
+        except requests.exceptions.RequestException as e:
+            print(f"Error during request: {e}")
+            return jsonify({"status": f"Error during request: {e}"}), 500
+        
+        protectedData = response.json()
+        userNames = list(protectedData.keys())
+        initiator = userNames.index(user_id)
+        clientX = [protectedData[user]['noisyX'] for user in userNames]
+        clientY = [protectedData[user]['noisyY'] for user in userNames]
+        cropLabels = list(set(clientY[0]))
+        clientProportions = []
+        for client in clientY:
+            row = [0 for i in range(len(cropLabels))]
+            for labelY in client:
+                row[cropLabels.index(labelY)] += 1
+            clientProportions.append(np.array([element/len(client) for element in row]))
+        clientProportions = np.array(clientProportions)
+        clientAverages = np.array([np.mean(client, axis=0) for client in clientX])
+
+        columns = list([i for i in range(7)])
+        df = pd.DataFrame(clientAverages, columns= columns)
+        
+
+        distances = pairwise_distances([df[columns].values[initiator]], df[columns].values, metric='euclidean')
+        collaboratorsIdx = [b[0] for b in sorted(enumerate(distances[0]),key=lambda i:i[1])]
+        collaborators = []
+        for idx in collaboratorsIdx[1:4]:
+            collaborators.append({ 'username': userNames[idx]})
+
+        return jsonify({'collaborators': collaborators}), 200
+
+    except Exception as e:
+        logging.error(f'Unexpected error: {str(e)}')
+        logging.error(traceback.format_exc())
+        return jsonify({'message': 'An error occurred while processing the file', 'error': str(e)}), 500
+
+@app.route("/getMessages", methods=["GET"])
+def get_messages():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+        
+        token = auth_header.split(' ')[1]
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        sender_id = request.get_json().get("sender_id")
+        receiver_id = request.get_json().get("receiver_id")
+        
+        # Fetching messages from the database
+        messages = db['messages'].find({
+            "$or": [
+                {"senderID": sender_id, "receiverID": receiver_id},
+                {"senderID": receiver_id, "receiverID": sender_id}
+            ]
+        })
+
+        # Formatting the response
+        messages_list = []
+        for message in messages:
+            messages_list.append({
+                "senderID": message["senderID"],
+                "receiverID": message["receiverID"],
+                "message": message["message"],
+                "timestamp": message["timestamp"]
+            })
+    except Exception as e:
+        logging.error(f'Unexpected error: {str(e)}')
+        logging.error(traceback.format_exc())
+        return jsonify({'message': 'An error occurred ', 'error': str(e)}), 500
+
+
+    return jsonify(messages_list)
+
+@app.route("/sendMessage", methods=["POST"])
+def send_message():
+    data = request.json
+    message = {
+        "senderID": data["senderID"],
+        "receiverID": data["receiverID"],
+        "message": data["message"],
+        "timestamp": data["timestamp"]
+    }
+
+    db['messages'].insert_one(message)
+    return jsonify({"status": "Message sent"}), 201
+
+@app.route('/conversations', methods=['GET'])
+def get_conversations():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+        
+        token = auth_header.split(' ')[1]
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        sender_id = request.get_json().get("sender_id")
+        if not sender_id:
+            return jsonify({"error": "sender_id is required"}), 400
+
+        # Find all messages where user is either sender or receiver
+        messages = db['messages'].find({
+            "$or": [
+                {"senderID": sender_id},
+                {"receiverID": sender_id}
+            ]
+        })
+        
+        # Create a dictionary to store latest message timestamp for each partner
+        conversation_partners = {}
+        for message in messages:
+            partner_id = message['receiverID'] if message['senderID'] == sender_id else message['senderID']
+            timestamp = message.get('timestamp')
+            
+            # Update timestamp only if it's more recent
+            if partner_id not in conversation_partners or timestamp > conversation_partners[partner_id]['timestamp']:
+                conversation_partners[partner_id] = {
+                    'partner_id': partner_id,
+                    'timestamp': timestamp,
+                    'last_message': message.get('content', '')
+                }
+        # Convert to list and sort by timestamp
+        sorted_partners = sorted(
+            conversation_partners.values(),
+            key=lambda x: x['timestamp'],
+            reverse=True  # Most recent first
+        )
+
+        return jsonify(sorted_partners), 200
+    
+    except Exception as e:
+        logging.error(f"Error in get_conversations: {str(e)}")
+        logging.error(traceback.format_exc())
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/train', methods=['POST'])
+def train():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+        
+        token = auth_header.split(' ')[1]
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+    
+        data_received = request.get_json()  # Get the JSON data from the request body
+        collaborators = [i['username'] for i in data_received.get('collaborators')]
+        hyperparameters = data_received.get('hyperparameters')
+
+        thread = threading.Thread(target=start_training_process, args=(collaborators, hyperparameters))
+        thread.start()
+    
+        return jsonify({'message': 'Training process started.'}), 200 # Return timing
+    
+    except Exception as e:
+        logging.error(f'Unexpected error: {str(e)}')
+        logging.error(traceback.format_exc())
+        return jsonify({'message': 'An error occurred while processing the file', 'error': str(e)}), 500
+
+@app.route('/api/test1', methods=['POST'])
+def test1():
+    try:
+        auth_header = request.headers.get('Authorization')
+        print(auth_header);
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+        
+        token = auth_header.split(' ')[1]
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        return jsonify({"status": "OK", "message": "Tapis token accepted"}), 200
+    
+    except Exception as e:
+        logging.error(f"Error in get_conversations: {str(e)}")
+        logging.error(traceback.format_exc())
+        return jsonify({"error": "Internal server error"}), 500
+    
+@app.route('/api/test', methods=['GET'])
+def test():
+    # Find all messages where user is either sender or receiver
+    messages = db['messages'].find({
+        "$or": [
+            {"senderID": 'osamazafar98'},
+            {"receiverID": 'osamazafar98'}
+        ]
+    })
+        
+    # Create a dictionary to store latest message timestamp for each partner
+    conversation_partners = {}
+    for message in messages:
+        partner_id = message['receiverID'] if message['senderID'] == 'osamazafar98' else message['senderID']
+        timestamp = message.get('timestamp')
+        
+        # Update timestamp only if it's more recent
+        if partner_id not in conversation_partners or timestamp > conversation_partners[partner_id]['timestamp']:
+            conversation_partners[partner_id] = {
+                'partner_id': partner_id,
+                'timestamp': timestamp,
+                'last_message': message.get('content', '')
+            }
+    print(list(messages))
+    # Convert to list and sort by timestamp
+    sorted_partners = sorted(
+        conversation_partners.values(),
+        key=lambda x: x['timestamp'],
+        reverse=True  # Most recent first
+    )
+
+    return jsonify(sorted_partners), 200
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True) 
