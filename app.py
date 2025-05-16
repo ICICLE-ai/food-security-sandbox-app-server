@@ -49,9 +49,9 @@ def create_jwt_token(username):
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
-def send_request_to_train_local_model(user_id, updates_list, hyperparameters, lock):
+def send_request_to_train_local_model(user_id, metadata, updates_list, hyperparameters, lock):
     try:
-        response = requests.post(f"http://digitalagriculturesandbox-farmer-server-1:5001/api/trainLocalModel", json={'userID': str(user_id), "hyperparameters": hyperparameters})
+        response = requests.post(f"http://digitalagriculturesandbox-farmer-server-1:5001/api/trainLocalModel", json={'userID': str(user_id), 'metadata':metadata, "hyperparameters": hyperparameters})
         response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
         data = response.json()
         print(data['userID'], ' ', data['training_time'])
@@ -105,10 +105,13 @@ def start_training_process(collaborators, hyperparameters):
 
     print(f"Starting training for {len(collaborators)} users...")
     start_time = time.time()
-
+    response = requests.get("http://digitalagriculturesandbox-farmer-server-1:5001/api/load_datasets", headers=headers, params={'datasetId' : selected_DS_ID})
+    print("sad",response)
+    metadata = response.json()['metadata']
+    
     # Create and start a thread for each user.
     for user_id in collaborators:
-        thread = threading.Thread(target=send_request_to_train_local_model, args=(user_id, updates, hyperparameters, lock))
+        thread = threading.Thread(target=send_request_to_train_local_model, args=(user_id, metadata, updates, hyperparameters, lock))
         threads.append(thread)
         thread.start()
 
@@ -471,10 +474,14 @@ def train():
         data_received = request.get_json()  # Get the JSON data from the request body
         collaborators = [i['username'] for i in data_received.get('collaborators')]
         hyperparameters = data_received.get('hyperparameters')
-
-        thread = threading.Thread(target=start_training_process, args=(collaborators, hyperparameters))
-        thread.start()
-    
+        headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+                }
+        response = requests.post("http://digitalagriculturesandbox-param-server-1:5002/api/start_training", headers=headers, json={'collaborators': collaborators, "hyperparameters": hyperparameters})
+        
+        if response:
+            print(response)
         return jsonify({'message': 'Training process started.'}), 200 # Return timing
     
     except Exception as e:
