@@ -17,14 +17,9 @@ from sklearn.metrics.pairwise import pairwise_distances
 from flask_socketio import SocketIO, emit, join_room, leave_room
 import json
 import threading
-from sklearn import datasets
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
-import time
-import torch
-import torch.nn as nn
-import torch.optim as optim
-
+from bson import json_util
 # Load environment variables
 load_dotenv()
 
@@ -48,109 +43,6 @@ def create_jwt_token(username):
         'exp': datetime.datetime.utcnow() + datetime.timedelta(days=1)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
-
-def send_request_to_train_local_model(user_id, metadata, updates_list, hyperparameters, lock):
-    try:
-        response = requests.post(f"http://digitalagriculturesandbox-farmer-server-1:5001/api/trainLocalModel", json={'userID': str(user_id), 'metadata':metadata, "hyperparameters": hyperparameters})
-        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
-        data = response.json()
-        print(data['userID'], ' ', data['training_time'])
-        # print(f"Received update from Farmer Server for user {user_id}: {data}") #  too verbose
-        with lock:
-            updates_list.append(data)
-    except requests.exceptions.RequestException as e:
-        print(f"Error sending request to Farmer Server for user {user_id}: {e}")
-        # Consider adding error handling here, such as retrying the request
-        # or logging the error to a file.  For now, we'll just print to the console.
-        with lock:
-            updates_list.append(None) # Append None to keep the order correct.
-
-def aggregate_updates(updates):
-    if not updates:
-        return [], []  # Return empty lists if there are no updates
-
-    # Initialize lists to store the sum of weights and intercepts
-    sum_weights = np.zeros_like(np.array(updates[0]['weights']))
-    sum_intercepts = np.zeros_like(np.array(updates[0]['intercept']))
-    total_training_time = 0
-
-    # Sum the weights and intercepts from all updates
-    for update in updates:
-        sum_weights += np.array(update['weights'])
-        sum_intercepts += np.array(update['intercept'])
-        total_training_time += update['training_time']
-
-    print(f"Total training time on Farmer Server: {total_training_time:.4f} seconds")
-    # Average the weights and intercepts
-    aggregated_weights = (sum_weights / len(updates)).tolist()
-    aggregated_intercept = (sum_intercepts / len(updates)).tolist()
-
-    return aggregated_weights, aggregated_intercept
-
-def save_model(weights, intercept):
-    try:
-        with open('aggregated_model.txt', 'w') as f:
-            f.write(f"Weights: {weights}\n")
-            f.write(f"Intercept: {intercept}\n")
-        print("Aggregated model saved to aggregated_model.txt")
-    except Exception as e:
-        print(f"Error saving model: {e}")
-
-def start_training_process(collaborators, hyperparameters):
-    # data_received = request.get_json()  # Get the JSON data from the request body
-    # n_users = int(data_received.get('n'))
-    updates = []
-    threads = []
-    lock = threading.Lock() #  Use a lock for thread-safe access to the updates list.
-
-    print(f"Starting training for {len(collaborators)} users...")
-    start_time = time.time()
-    response = requests.get("http://digitalagriculturesandbox-farmer-server-1:5001/api/load_datasets", headers=headers, params={'datasetId' : selected_DS_ID})
-    print("sad",response)
-    metadata = response.json()['metadata']
-    
-    # Create and start a thread for each user.
-    for user_id in collaborators:
-        thread = threading.Thread(target=send_request_to_train_local_model, args=(user_id, metadata, updates, hyperparameters, lock))
-        threads.append(thread)
-        thread.start()
-
-    # Wait for all threads to complete.
-    for thread in threads:
-        thread.join()
-
-    end_time = time.time()
-    total_time = end_time - start_time
-    print(f"All training threads completed in {total_time:.4f} seconds.")
-    print(f"Received {len(updates)} updates from Farmer Server.")
-
-    # Check for any failed requests (None values in updates list)
-    if None in updates:
-        print("Warning: Some requests to Farmer Server failed.  Aggregation may be incomplete.")
-        #  Remove the None values before proceeding with aggregation
-        updates = [u for u in updates if u is not None]
-
-
-    # Aggregate the updates.
-    if hyperparameters['modelName'] == 'NN':
-        aggregated_weights = federated_averaging(updates)
-        # Save the aggregated model to a file.
-        save_model(aggregated_weights, None)
-    else:
-        aggregated_weights, aggregated_intercept = aggregate_updates(updates)
-        # Save the aggregated model to a file.
-        save_model(aggregated_weights, aggregated_intercept)
-    
-    print({'message': 'Training complete', 'total_time': total_time, 'num_updates': len(updates)}) # Return timing
-
-# Federated Averaging
-def federated_averaging(local_weights_list):
-    # Averaging the weights for each layer
-    global_weights = {}
-    for layer in local_weights_list[0].keys():
-        global_weights[layer] = torch.mean(torch.stack([w[layer] for w in local_weights_list]), dim=0)
-    return global_weights
-
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -292,6 +184,7 @@ def get_similar_farmers():
         
         protectedData = response.json()
         userNames = list(protectedData.keys())
+        print(userNames)
         initiator = userNames.index(user_id)
         clientX = [protectedData[user]['noisyX'] for user in userNames]
         clientY = [protectedData[user]['noisyY'] for user in userNames]
@@ -471,14 +364,43 @@ def train():
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
     
+        user_id = payload['username']
+
         data_received = request.get_json()  # Get the JSON data from the request body
         collaborators = [i['username'] for i in data_received.get('collaborators')]
         hyperparameters = data_received.get('hyperparameters')
+        
         headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-                }
-        response = requests.post("http://digitalagriculturesandbox-param-server-1:5002/api/start_training", headers=headers, json={'collaborators': collaborators, "hyperparameters": hyperparameters})
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json"
+                    }
+        response = requests.get("http://digitalagriculturesandbox-farmer-server-1:5001/api/get_datasets_metadata", headers=headers, params={'datasetId' : hyperparameters['datasetName']})
+        
+        metadata = response.json()['metadata']
+        num_classes = response.json()['num_classes']
+        classes = response.json()['classes']
+        
+        data = {
+                'modelName': hyperparameters['modelName'], 
+                'modelType': hyperparameters['modelType'], 
+                'modelVisibility': hyperparameters['modelVisibility'],
+                'metadata' : metadata,
+                'modelOwner' : user_id,
+                'modelWeights' : None,
+                'collaborators' : collaborators,
+                'num_classes' : num_classes,
+                'classes' : classes,
+                'status' : 'Training'
+            }
+        result = None
+        if hyperparameters['modelVisibility'] == 'Public':
+            result = db['models'].insert_one(data)
+        else:
+            result = db['models'][user_id].insert_one(data)
+
+        model_id = str(result.inserted_id)
+
+        response = requests.post("http://digitalagriculturesandbox-param-server-1:5002/api/start_training", headers=headers, json={'collaborators': collaborators, 'metadata': metadata, 'model_id' : model_id, "hyperparameters": hyperparameters})
         
         if response:
             print(response)
@@ -489,11 +411,51 @@ def train():
         logging.error(traceback.format_exc())
         return jsonify({'message': 'An error occurred while processing the file', 'error': str(e)}), 500
 
-@app.route('/api/test1', methods=['POST'])
-def test1():
+
+@app.route('/api/predict_model', methods=['POST'])
+def get_model_prediction():
     try:
         auth_header = request.headers.get('Authorization')
-        print(auth_header);
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+        
+        token = auth_header.split(' ')[1]
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+    
+        user_id = payload['username']
+
+        model_info = request.get_json()['model_info']
+        eval_data = request.get_json()['eval_data']
+        
+        headers = {'Authorization': f'Bearer {token}'}
+        response = requests.post("http://digitalagriculturesandbox-farmer-server-1:5001/api/predict_eval", 
+                                headers=headers, 
+                                json={'model_info': model_info, 'eval_data': eval_data})
+        
+        return jsonify(response.json()), 200 # Return timing
+
+    except Exception as e:
+        logging.error(f'Unexpected error: {str(e)}')
+        logging.error(traceback.format_exc())
+        return jsonify({'message': 'An error occurred while processing the file', 'error': str(e)}), 500
+
+@app.route('/api/get_public_models', methods=['GET'])
+def get_public_models():
+    try:
+        auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
         
@@ -513,44 +475,70 @@ def test1():
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
         
-        return jsonify({"status": "OK", "message": "Tapis token accepted"}), 200
+        user_id = payload['username']
+        # Query the datasets collection for the user's datasets
+        models = db['models'].find()
+        # Remove modelWeights field from each model
+        models_list = list(models)
+        for model in models_list:
+            if 'modelWeights' in model:
+                del model['modelWeights']
+        
+        return jsonify(json_util.dumps(models_list)), 200
     
     except Exception as e:
-        logging.error(f"Error in get_conversations: {str(e)}")
+        logging.error(f'Unexpected error: {str(e)}')
         logging.error(traceback.format_exc())
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({'message': 'An error occurred while loading datasets', 'error': str(e)}), 500
+
+@app.route('/api/get_user_models', methods=['GET'])
+def get_user_models():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+        
+        token = auth_header.split(' ')[1]
+
+        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": payload['username']})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        user_id = payload['username']
+        # Query the datasets collection for the user's datasets
+        models = db['models'][user_id].find()
+        # Remove modelWeights field from each model
+        models_list = list(models)
+        for model in models_list:
+            if 'modelWeights' in model:
+                del model['modelWeights']
+
+        return jsonify(json_util.dumps(models_list)), 200
     
+    except Exception as e:
+        logging.error(f'Unexpected error: {str(e)}')
+        logging.error(traceback.format_exc())
+        return jsonify({'message': 'An error occurred while loading datasets', 'error': str(e)}), 500
+    
+
 @app.route('/api/test', methods=['GET'])
 def test():
     # Find all messages where user is either sender or receiver
-    messages = db['messages'].find({
-        "$or": [
-            {"senderID": 'osamazafar98'},
-            {"receiverID": 'osamazafar98'}
-        ]
-    })
-        
-    # Create a dictionary to store latest message timestamp for each partner
-    conversation_partners = {}
-    for message in messages:
-        partner_id = message['receiverID'] if message['senderID'] == 'osamazafar98' else message['senderID']
-        timestamp = message.get('timestamp')
-        
-        # Update timestamp only if it's more recent
-        if partner_id not in conversation_partners or timestamp > conversation_partners[partner_id]['timestamp']:
-            conversation_partners[partner_id] = {
-                'partner_id': partner_id,
-                'timestamp': timestamp,
-                'last_message': message.get('content', '')
-            }
-    print(list(messages))
-    # Convert to list and sort by timestamp
-    sorted_partners = sorted(
-        conversation_partners.values(),
-        key=lambda x: x['timestamp'],
-        reverse=True  # Most recent first
-    )
-
-    return jsonify(sorted_partners), 200
+    collections = db['datasets']['osamazafar98'].find({})
+    names = ['Test4']
+    for name in names:
+        for doc in collections:
+            db['datasets'][name].insert_one(doc)
+    return jsonify(json.dumps('Done', default=str)), 200
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True) 
