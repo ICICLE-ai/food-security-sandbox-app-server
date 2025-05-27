@@ -445,7 +445,7 @@ def get_model_prediction():
                                 headers=headers, 
                                 json={'model_info': model_info, 'eval_data': eval_data})
         
-        return jsonify(response.json()), 200 # Return timing
+        return jsonify(response.json()), 200 
 
     except Exception as e:
         logging.error(f'Unexpected error: {str(e)}')
