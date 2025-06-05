@@ -29,6 +29,9 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # MongoDB connection
 mongo_uri = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/digital_agriculture')
+REACT_APP_FARMER_API_URL = os.getenv('REACT_APP_FARMER_API_URL', 'http://digital-agriculture-sandbox-farmer-server-1:5001')
+REACT_APP_PARAM_API_URL = os.getenv('REACT_APP_PARAM_API_URL', 'http://digital-agriculture-sandbox-param-server-1:5002')
+
 client = MongoClient(mongo_uri)
 db = client.digital_agriculture
 messages_collection = db['messages']
@@ -176,8 +179,8 @@ def get_similar_farmers():
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json"
                 }
-            response = requests.get("http://digitalagriculturesandbox-farmer-server-1:5001/api/load_datasets", headers=headers, params={'datasetId' : selected_DS_ID})
-            print("sad",response)
+            
+            response = requests.get(f"{REACT_APP_FARMER_API_URL}/api/load_datasets", headers=headers, params={'datasetId' : selected_DS_ID})
         except requests.exceptions.RequestException as e:
             print(f"Error during request: {e}")
             return jsonify({"status": f"Error during request: {e}"}), 500
@@ -374,7 +377,7 @@ def train():
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json"
                     }
-        response = requests.get("http://digitalagriculturesandbox-farmer-server-1:5001/api/get_datasets_metadata", headers=headers, params={'datasetId' : hyperparameters['datasetName']})
+        response = requests.get(f"{REACT_APP_FARMER_API_URL}/api/get_datasets_metadata", headers=headers, params={'datasetId' : hyperparameters['datasetName']})
         
         metadata = response.json()['metadata']
         num_classes = response.json()['num_classes']
@@ -387,6 +390,7 @@ def train():
                 'metadata' : metadata,
                 'modelOwner' : user_id,
                 'modelWeights' : None,
+                'modelReadme' : hyperparameters['readme'],
                 'collaborators' : collaborators,
                 'num_classes' : num_classes,
                 'classes' : classes,
@@ -400,7 +404,7 @@ def train():
 
         model_id = str(result.inserted_id)
 
-        response = requests.post("http://digitalagriculturesandbox-param-server-1:5002/api/start_training", headers=headers, json={'collaborators': collaborators, 'metadata': metadata, 'model_id' : model_id, "hyperparameters": hyperparameters})
+        response = requests.post(f"{REACT_APP_PARAM_API_URL}/api/start_training", headers=headers, json={'collaborators': collaborators, 'metadata': metadata, 'model_id' : model_id, "hyperparameters": hyperparameters})
         
         if response:
             print(response)
@@ -441,7 +445,7 @@ def get_model_prediction():
         eval_data = request.get_json()['eval_data']
         
         headers = {'Authorization': f'Bearer {token}'}
-        response = requests.post("http://digitalagriculturesandbox-farmer-server-1:5001/api/predict_eval", 
+        response = requests.post(f"{REACT_APP_FARMER_API_URL}/api/predict_eval", 
                                 headers=headers, 
                                 json={'model_info': model_info, 'eval_data': eval_data})
         
@@ -535,10 +539,49 @@ def get_user_models():
 def test():
     # Find all messages where user is either sender or receiver
     collections = db['datasets']['osamazafar98'].find({})
-    names = ['Test4']
-    for name in names:
-        for doc in collections:
-            db['datasets'][name].insert_one(doc)
+    documents_to_copy = list(collections.sort('_id', 1).skip(1))
+
+    if not documents_to_copy:
+        return jsonify({"status": "error", "message": "No documents found to copy (or only one document exists)."})
+
+    # Ensure we have exactly 4 documents if that's the strict requirement,
+    # or adjust if you want to copy all available documents after the first.
+    # For "last 4 documents", if source has 5, this should work.
+    # If source has less than 5, this will copy whatever is available after the first.
+    if len(documents_to_copy) < 4:
+        print(f"Warning: Found only {len(documents_to_copy)} documents to copy after skipping the first.")
+    
+    # Define the new collection names
+    new_collection_names = ['Test1', 'Test2', 'Test3', 'Test4']
+    
+    # This will hold status messages for each operation
+    results = {}
+
+    # Loop through the new collection names and the documents to copy
+    # We use zip to pair them up. If there are fewer than 4 documents to copy,
+    # zip will naturally stop at the shortest sequence.
+    for i, (new_name, doc) in enumerate(zip(new_collection_names, documents_to_copy)):
+        target_collection = db['datasets'][new_name] # Access the new collection (it will be created if it doesn't exist)
+        
+        # Remove the '_id' field from the document to be inserted.
+        # MongoDB automatically generates a new unique _id for each new insertion,
+        # preventing 'DuplicateKeyError' if the original _id were kept.
+        if '_id' in doc:
+            del doc['_id']
+        
+        try:
+            inserted_result = target_collection.insert_one(doc)
+            results[new_name] = {
+                "status": "success",
+                "inserted_id": str(inserted_result.inserted_id),
+                "message": f"Document copied to {new_name}"
+            }
+        except Exception as e:
+            results[new_name] = {
+                "status": "error",
+                "message": f"Failed to insert document into {new_name}: {str(e)}"
+            }
+    
     return jsonify(json.dumps('Done', default=str)), 200
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True) 
+    app.run(host='0.0.0.0', port=5003, debug=True) 
