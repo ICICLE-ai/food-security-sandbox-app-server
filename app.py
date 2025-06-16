@@ -218,7 +218,7 @@ def get_similar_farmers():
         logging.error(traceback.format_exc())
         return jsonify({'message': 'An error occurred while processing the file', 'error': str(e)}), 500
 
-@app.route("/getMessages", methods=["GET"])
+@app.route("/getMessages", methods=["POST"])
 def get_messages():
     try:
         auth_header = request.headers.get('Authorization')
@@ -282,7 +282,7 @@ def send_message():
     db['messages'].insert_one(message)
     return jsonify({"status": "Message sent"}), 201
 
-@app.route('/conversations', methods=['GET'])
+@app.route('/conversations', methods=['POST'])
 def get_conversations():
     try:
         auth_header = request.headers.get('Authorization')
@@ -306,6 +306,7 @@ def get_conversations():
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
         
         sender_id = request.get_json().get("sender_id")
+        print(sender_id)
         if not sender_id:
             return jsonify({"error": "sender_id is required"}), 400
 
