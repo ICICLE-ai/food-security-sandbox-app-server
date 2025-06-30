@@ -201,7 +201,7 @@ def get_similar_farmers():
         clientProportions = np.array(clientProportions)
         clientAverages = np.array([np.mean(client, axis=0) for client in clientX])
 
-        columns = list([i for i in range(7)])
+        columns = list([i for i in range(2)])
         df = pd.DataFrame(clientAverages, columns= columns)
         
 
@@ -214,6 +214,7 @@ def get_similar_farmers():
         return jsonify({'collaborators': collaborators}), 200
 
     except Exception as e:
+        print(e)
         logging.error(f'Unexpected error: {str(e)}')
         logging.error(traceback.format_exc())
         return jsonify({'message': 'An error occurred while processing the file', 'error': str(e)}), 500
@@ -586,3 +587,27 @@ def test():
     return jsonify(json.dumps('Done', default=str)), 200
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5003, debug=True) 
+
+
+os.environ["APP_CONFIG_PATH"] = "./config.yaml"
+
+from iciflaskn import icicle_flaskn
+from iciflaskn import auth
+from iciflaskn.config import config
+
+@app.route('/oauth_login', methods=['GET'])
+def oauth2_login():
+    """
+    Check for the existence of a login session, and if none exists, start the OAuth2 flow.
+    """
+    authenticated, _, _ = auth.is_logged_in()
+    # if already authenticated, redirect to the root URL
+    if authenticated:
+        result = {'path':'/', 'code': 302}
+        return result
+    # otherwise, start the OAuth flow
+    callback_url = f"{config['app_base_url']}/oauth2/callback"
+    tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
+    # print('no, not auth, redirect to:',tapis_url)
+    result = {'path': tapis_url, 'code':302}
+    return jsonify(result)
