@@ -20,6 +20,8 @@ import threading
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from bson import json_util
+
+
 # Load environment variables
 load_dotenv()
 
@@ -46,6 +48,8 @@ def create_jwt_token(username):
         'exp': datetime.datetime.utcnow() + datetime.timedelta(days=1)
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
+
+
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
@@ -450,6 +454,7 @@ def get_model_prediction():
         response = requests.post(f"{REACT_APP_FARMER_API_URL}/api/predict_eval", 
                                 headers=headers, 
                                 json={'model_info': model_info, 'eval_data': eval_data})
+        
         
         return jsonify(response.json()), 200 
 
