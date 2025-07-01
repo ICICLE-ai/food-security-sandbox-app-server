@@ -377,6 +377,7 @@ def train():
 
         data_received = request.get_json()  # Get the JSON data from the request body
         collaborators = [i['username'] for i in data_received.get('collaborators')]
+        # collaborators.append(user_id)
         hyperparameters = data_received.get('hyperparameters')
         
         headers = {
@@ -594,25 +595,3 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5003, debug=True) 
 
 
-os.environ["APP_CONFIG_PATH"] = "./config.yaml"
-
-from iciflaskn import icicle_flaskn
-from iciflaskn import auth
-from iciflaskn.config import config
-
-@app.route('/oauth_login', methods=['GET'])
-def oauth2_login():
-    """
-    Check for the existence of a login session, and if none exists, start the OAuth2 flow.
-    """
-    authenticated, _, _ = auth.is_logged_in()
-    # if already authenticated, redirect to the root URL
-    if authenticated:
-        result = {'path':'/', 'code': 302}
-        return result
-    # otherwise, start the OAuth flow
-    callback_url = f"{config['app_base_url']}/oauth2/callback"
-    tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
-    # print('no, not auth, redirect to:',tapis_url)
-    result = {'path': tapis_url, 'code':302}
-    return jsonify(result)
