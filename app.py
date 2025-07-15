@@ -167,7 +167,6 @@ def callback():
     url = f"{settings.tapis_base_url}/v3/oauth2/tokens"
     data = {
         "code": code, 
-        # "redirect_uri": f"{settings.app_base_url}/api/oauth2/callback",
         "redirect_uri": settings.callback_url,
         "grant_type": "authorization_code",
     }
