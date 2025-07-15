@@ -173,12 +173,14 @@ def callback():
     url = f"{config['tapis_base_url']}/v3/oauth2/tokens"
     data = {
         "code": code, 
-        "redirect_uri": f"{config['app_base_url']}/api/oauth2/callback", 
+        "redirect_uri": f"{config['app_base_url']}", 
         "grant_type": "authorization_code",
     }
     try:
+        print(url)
+        print(data)
+        print((config['client_id'], config['client_key']))
         response = requests.post(url, data=data, auth=(config['client_id'], config['client_key']))
-        print(response.text)
         response.raise_for_status()
         json_resp = json.loads(response.text)
         token = json_resp['result']['access_token']['access_token']

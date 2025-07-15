@@ -8,7 +8,7 @@ tenant: icicleai
 
 # The base URL that you app isserved on; this needs to match what was registered with the  OAuth client
 #the catalog to a public URL. 
-app_base_url: https://digital-agriculture-sandbox-frontend-1:3000
+app_base_url: http://localhost:3000/
 
 callback_url: http://localhost:5003/api/oauth2/callback
 
