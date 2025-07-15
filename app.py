@@ -1,30 +1,24 @@
-from flask import Flask, jsonify, request, render_template, redirect
+from flask import Flask, jsonify, request, redirect
 from flask_cors import CORS
 from pymongo import MongoClient
 import os
 from dotenv import load_dotenv
 from jose import jwt
 import datetime
-from tapipy.tapis import Tapis
 import logging
 import traceback
 import pandas as pd
-import datetime
-from bson.objectid import ObjectId
 import requests
 import numpy as np
 from sklearn.metrics.pairwise import pairwise_distances
-from flask_socketio import SocketIO, emit, join_room, leave_room
+from flask_socketio import SocketIO
 import json
-import threading
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LogisticRegression
 from bson import json_util
-import yaml
 
-with open('config.yaml', 'r') as file:
-    config = yaml.safe_load(file)
+# with open('config.yaml', 'r') as file:
+#     config = yaml.safe_load(file)
 
+from config import settings
 
 # Load environment variables
 load_dotenv()
@@ -55,15 +49,15 @@ def create_jwt_token(username):
 
 
 
-@app.route('/api/auth/login', methods=['POST'])
+@app.route('/login', methods=['GET'])
 def login():
     try:
-        data = request.json
-        username = data.get('username')
-        password = data.get('password')
-
-        if not username or not password:
-            return jsonify({"status": "error", "message": "Username and password are required"}), 400
+        # data = request.json
+        # username = data.get('username')
+        # password = data.get('password')
+        #
+        # if not username or not password:
+        #     return jsonify({"status": "error", "message": "Username and password are required"}), 400
 
         # # Create Tapis client and authenticate
         # t = Tapis(
@@ -95,8 +89,8 @@ def login():
         #     return redirect("/", code=302)
         # # otherwise, start the OAuth flow
         
-        callback_url = f"{config['app_base_url']}/api/oauth2/callback"
-        tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
+        # callback_url = f"{settings.app_base_url}/api/oauth2/callback"
+        tapis_url = f"{settings.tapis_base_url}/v3/oauth2/authorize?client_id={settings.client_id}&redirect_uri={settings.callback_url}&response_type=code"
         # return redirect(tapis_url, code=302)
         return redirect(tapis_url, code=302)
 
@@ -143,19 +137,19 @@ def verify_token():
 def health_check():
     return jsonify({"status": "healthy", "service": "app-server"})
 
-@app.route('/login', methods=['GET'])
-def auth_login():
-    """
-    Check for the existence of a login session, and if none exists, start the OAuth2 flow.
-    """
-    # authenticated, _, _ = auth.is_logged_in()
-    # # if already authenticated, redirect to the root URL
-    # if authenticated:
-    #     return redirect("/", code=302)
-    # # otherwise, start the OAuth flow
-    callback_url = f"{config['callback_url']}"
-    tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
-    return redirect(tapis_url, code=302)
+# @app.route('/login', methods=['GET'])
+# def auth_login():
+#     """
+#     Check for the existence of a login session, and if none exists, start the OAuth2 flow.
+#     """
+#     # authenticated, _, _ = auth.is_logged_in()
+#     # # if already authenticated, redirect to the root URL
+#     # if authenticated:
+#     #     return redirect("/", code=302)
+#     # # otherwise, start the OAuth flow
+#     callback_url = f"{config['callback_url']}"
+#     tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
+#     return redirect(tapis_url, code=302)
 
 
 @app.route('/api/oauth2/callback', methods=['GET'])
@@ -170,14 +164,15 @@ def callback():
     code = request.args.get('code')
     if not code:
         raise Exception(f"Error: No code in request; debug: {request.args}")
-    url = f"{config['tapis_base_url']}/v3/oauth2/tokens"
+    url = f"{settings.tapis_base_url}/v3/oauth2/tokens"
     data = {
         "code": code, 
-        "redirect_uri": f"{config['app_base_url']}/api/oauth2/callback", 
+        # "redirect_uri": f"{settings.app_base_url}/api/oauth2/callback",
+        "redirect_uri": settings.callback_url,
         "grant_type": "authorization_code",
     }
     try:
-        response = requests.post(url, data=data, auth=(config['client_id'], config['client_key']))
+        response = requests.post(url, data=data, auth=(settings.client_id, settings.client_key))
         print(response.text)
         response.raise_for_status()
         json_resp = json.loads(response.text)
@@ -219,7 +214,7 @@ def callback():
     # roles = auth.add_user_to_session(username, token)
     # current_app.logger.info(f"Username added to session; found these roles: {roles}")
     
-    return redirect("/", code=302)    
+    return redirect(settings.app_base_url, code=302)
 
 
 @app.route('/api/get_similar_farmers', methods=['POST'])
