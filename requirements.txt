@@ -10,3 +10,4 @@ pandas==2.2.3
 numpy
 scikit-learn
 flask-socketio
+pydantic_settings

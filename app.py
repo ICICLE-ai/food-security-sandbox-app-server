@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, redirect
 from flask_cors import CORS
 from pymongo import MongoClient
 import os
@@ -20,6 +20,10 @@ import threading
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from bson import json_util
+import yaml
+
+with open('config.yaml', 'r') as file:
+    config = yaml.safe_load(file)
 
 
 # Load environment variables
@@ -61,49 +65,41 @@ def login():
         if not username or not password:
             return jsonify({"status": "error", "message": "Username and password are required"}), 400
 
-        # Create Tapis client and authenticate
-        t = Tapis(
-            base_url="https://tacc.tapis.io",
-            username=username,
-            password=password
-        )
+        # # Create Tapis client and authenticate
+        # t = Tapis(
+        #     base_url="https://tacc.tapis.io",
+        #     username=username,
+        #     password=password
+        # )
 
-        # Get tokens from Tapis
-        t.get_tokens()
+        # # Get tokens from Tapis
+        # t.get_tokens()
 
-        if not t.access_token:
-            return jsonify({"status": "error", "message": "Authentication failed"}), 401
+        # if not t.access_token:
+        #     return jsonify({"status": "error", "message": "Authentication failed"}), 401
 
-        # Create JWT token for our application
-        token = create_jwt_token(username)
+        # # Create JWT token for our application
+        # token = create_jwt_token(username)
         
-        # Extract token information
-        tapis_token_info = {
-            'access_token': t.access_token.access_token,
-            'expires_at': t.access_token.expires_at.isoformat(),
-            'jti': t.access_token.jti,
-            'original_ttl': t.access_token.original_ttl
-        }
+        # # Extract token information
+        # tapis_token_info = {
+        #     'access_token': t.access_token.access_token,
+        #     'expires_at': t.access_token.expires_at.isoformat(),
+        #     'jti': t.access_token.jti,
+        #     'original_ttl': t.access_token.original_ttl
+        # }
 
-        # Store user session in MongoDB
-        db.sessions.update_one(
-            {"username": username},
-            {
-                "$set": {
-                    "username": username,
-                    "tapis_token": tapis_token_info,
-                    "last_login": datetime.datetime.utcnow()
-                }
-            },
-            upsert=True
-        )
+        # authenticated, _, _ = auth.is_logged_in()
+        # # if already authenticated, redirect to the root URL
+        # if authenticated:
+        #     return redirect("/", code=302)
+        # # otherwise, start the OAuth flow
+        
+        callback_url = f"{config['app_base_url']}/api/oauth2/callback"
+        tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
+        # return redirect(tapis_url, code=302)
+        return redirect(tapis_url, code=302)
 
-        return jsonify({
-            "status": "success",
-            "token": token,
-            "username": username,
-            "tapis_token": tapis_token_info
-        })
 
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -146,6 +142,84 @@ def verify_token():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy", "service": "app-server"})
+
+@app.route('/login', methods=['GET'])
+def auth_login():
+    """
+    Check for the existence of a login session, and if none exists, start the OAuth2 flow.
+    """
+    # authenticated, _, _ = auth.is_logged_in()
+    # # if already authenticated, redirect to the root URL
+    # if authenticated:
+    #     return redirect("/", code=302)
+    # # otherwise, start the OAuth flow
+    callback_url = f"{config['callback_url']}"
+    tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
+    return redirect(tapis_url, code=302)
+
+
+@app.route('/api/oauth2/callback', methods=['GET'])
+def callback():
+    """
+    Process a callback from a Tapis authorization server:
+      1) Get the authorization code from the query parameters.
+      2) Exchange the code for a token
+      3) Add the user and token to the session
+      4) Redirect to the /data endpoint. 
+    """
+    code = request.args.get('code')
+    if not code:
+        raise Exception(f"Error: No code in request; debug: {request.args}")
+    url = f"{config['tapis_base_url']}/v3/oauth2/tokens"
+    data = {
+        "code": code, 
+        "redirect_uri": f"{config['app_base_url']}/api/oauth2/callback", 
+        "grant_type": "authorization_code",
+    }
+    try:
+        response = requests.post(url, data=data, auth=(config['client_id'], config['client_key']))
+        print(response.text)
+        response.raise_for_status()
+        json_resp = json.loads(response.text)
+        token = json_resp['result']['access_token']['access_token']
+    except Exception as e:
+        raise Exception(f"Error generating Tapis token; debug: {e}")
+
+    print(token)
+
+    # username = auth.get_username(token)
+
+    # tapis_token_info = {
+    #         'access_token': t.access_token.access_token,
+    #         'expires_at': t.access_token.expires_at.isoformat(),
+    #         'jti': t.access_token.jti,
+    #         'original_ttl': t.access_token.original_ttl
+    #     }
+
+    # # Store user session in MongoDB
+    # db.sessions.update_one(
+    #     {"username": username},
+    #     {
+    #         "$set": {
+    #             "username": username,
+    #             "tapis_token": tapis_token_info,
+    #             "last_login": datetime.datetime.utcnow()
+    #         }
+    #     },
+    #     upsert=True
+    #     )
+
+        # return jsonify({
+        #     "status": "success",
+        #     "token": token,
+        #     "username": username,
+        #     "tapis_token": tapis_token_info
+        # })
+    # current_app.logger.info(f"Got username for token; username: {username}")
+    # roles = auth.add_user_to_session(username, token)
+    # current_app.logger.info(f"Username added to session; found these roles: {roles}")
+    
+    return redirect("/", code=302)    
 
 
 @app.route('/api/get_similar_farmers', methods=['POST'])
