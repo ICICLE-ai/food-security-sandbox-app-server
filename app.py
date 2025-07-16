@@ -29,8 +29,8 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # MongoDB connection
 mongo_uri = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/digital_agriculture')
-REACT_APP_FARMER_API_URL = os.getenv('REACT_APP_FARMER_API_URL', 'http://digital-agriculture-sandbox-farmer-server-1:5001')
-REACT_APP_PARAM_API_URL = os.getenv('REACT_APP_PARAM_API_URL', 'http://digital-agriculture-sandbox-param-server-1:5002')
+REACT_APP_FARMER_API_URL = os.getenv('REACT_APP_FARMER_API_URL', 'http://localhost:5001')
+REACT_APP_PARAM_API_URL = os.getenv('REACT_APP_PARAM_API_URL', 'http://localhost:5002')
 
 client = MongoClient(mongo_uri)
 db = client.digital_agriculture
@@ -47,49 +47,9 @@ def create_jwt_token(username):
     }
     return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
-
-
-@app.route('/login', methods=['GET'])
+@app.route('/api/auth/login', methods=['GET'])
 def login():
     try:
-        # data = request.json
-        # username = data.get('username')
-        # password = data.get('password')
-        #
-        # if not username or not password:
-        #     return jsonify({"status": "error", "message": "Username and password are required"}), 400
-
-        # # Create Tapis client and authenticate
-        # t = Tapis(
-        #     base_url="https://tacc.tapis.io",
-        #     username=username,
-        #     password=password
-        # )
-
-        # # Get tokens from Tapis
-        # t.get_tokens()
-
-        # if not t.access_token:
-        #     return jsonify({"status": "error", "message": "Authentication failed"}), 401
-
-        # # Create JWT token for our application
-        # token = create_jwt_token(username)
-        
-        # # Extract token information
-        # tapis_token_info = {
-        #     'access_token': t.access_token.access_token,
-        #     'expires_at': t.access_token.expires_at.isoformat(),
-        #     'jti': t.access_token.jti,
-        #     'original_ttl': t.access_token.original_ttl
-        # }
-
-        # authenticated, _, _ = auth.is_logged_in()
-        # # if already authenticated, redirect to the root URL
-        # if authenticated:
-        #     return redirect("/", code=302)
-        # # otherwise, start the OAuth flow
-        
-        # callback_url = f"{settings.app_base_url}/api/oauth2/callback"
         tapis_url = f"{settings.tapis_base_url}/v3/oauth2/authorize?client_id={settings.client_id}&redirect_uri={settings.callback_url}&response_type=code"
         # return redirect(tapis_url, code=302)
         return redirect(tapis_url, code=302)
@@ -106,10 +66,11 @@ def verify_token():
             return jsonify({"status": "error", "message": "Invalid token"}), 401
 
         token = auth_header.split(' ')[1]
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -122,7 +83,7 @@ def verify_token():
 
         return jsonify({
             "status": "success",
-            "username": payload['username'],
+            "username": username,
             "tapis_token": session['tapis_token']
         })
 
@@ -137,20 +98,22 @@ def verify_token():
 def health_check():
     return jsonify({"status": "healthy", "service": "app-server"})
 
-# @app.route('/login', methods=['GET'])
-# def auth_login():
-#     """
-#     Check for the existence of a login session, and if none exists, start the OAuth2 flow.
-#     """
-#     # authenticated, _, _ = auth.is_logged_in()
-#     # # if already authenticated, redirect to the root URL
-#     # if authenticated:
-#     #     return redirect("/", code=302)
-#     # # otherwise, start the OAuth flow
-#     callback_url = f"{config['callback_url']}"
-#     tapis_url = f"{config['tapis_base_url']}/v3/oauth2/authorize?client_id={config['client_id']}&redirect_uri={callback_url}&response_type=code"
-#     return redirect(tapis_url, code=302)
-
+@app.route('/api/auth/get_username', methods=['GET'])
+def get_username(token):
+    """
+    Validate a Tapis JWT, `token`, and resolve it to a username.
+    """
+    headers = {'Content-Type': 'text/html'}
+    # call the userinfo endpoint
+    url = f"{settings.tapis_base_url}/v3/oauth2/userinfo"
+    headers = {'X-Tapis-Token': token}
+    try:
+        rsp = requests.get(url, headers=headers)
+        rsp.raise_for_status()
+        username = rsp.json()['result']['username']
+    except Exception as e:
+        raise Exception(f"Error looking up token info; debug: {e}")
+    return username
 
 @app.route('/api/oauth2/callback', methods=['GET'])
 def callback():
@@ -176,6 +139,26 @@ def callback():
         response.raise_for_status()
         json_resp = json.loads(response.text)
         token = json_resp['result']['access_token']['access_token']
+        tapis_token_info = {
+            'access_token': json_resp['result']['access_token']['access_token'],
+            'expires_at': json_resp['result']['access_token']['expires_at'],
+            'jti': json_resp['result']['access_token']['jti']
+        }
+        
+        username = get_username(json_resp['result']['access_token']['access_token'])
+
+        # Store user session in MongoDB
+        db.sessions.update_one(
+            {"username": username},
+            {
+                "$set": {
+                    "username": username,
+                    "tapis_token": tapis_token_info,
+                    "last_login": datetime.datetime.utcnow()
+                }
+            },
+            upsert=True
+        )
     except Exception as e:
         raise Exception(f"Error generating Tapis token; debug: {e}")
 
@@ -213,7 +196,7 @@ def callback():
     # roles = auth.add_user_to_session(username, token)
     # current_app.logger.info(f"Username added to session; found these roles: {roles}")
     
-    return redirect(settings.app_base_url, code=302)
+    return redirect(settings.app_base_url+"/?tapis_token="+str(token)+"&username="+str(username), code=302)
 
 
 @app.route('/api/get_similar_farmers', methods=['POST'])
@@ -222,13 +205,13 @@ def get_similar_farmers():
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
-        token = auth_header.split(' ')[1]
 
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        token = auth_header.split(' ')[1]
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -239,7 +222,8 @@ def get_similar_farmers():
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
         
-        user_id = payload['username']
+        user_id = username
+        
         data = request.get_json()  # Get the JSON data from the request body
         selected_DS_ID = data.get('selectedDataset')  # Extract selectedDataset
         print("sad",selected_DS_ID)
@@ -297,13 +281,13 @@ def get_messages():
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
-        token = auth_header.split(' ')[1]
 
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        token = auth_header.split(' ')[1]
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -313,6 +297,8 @@ def get_messages():
         
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        user_id = username
         
         sender_id = request.get_json().get("sender_id")
         receiver_id = request.get_json().get("receiver_id")
@@ -344,30 +330,17 @@ def get_messages():
 
 @app.route("/sendMessage", methods=["POST"])
 def send_message():
-    data = request.json
-    message = {
-        "senderID": data["senderID"],
-        "receiverID": data["receiverID"],
-        "message": data["message"],
-        "timestamp": data["timestamp"]
-    }
-
-    db['messages'].insert_one(message)
-    return jsonify({"status": "Message sent"}), 201
-
-@app.route('/conversations', methods=['POST'])
-def get_conversations():
     try:
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
-        token = auth_header.split(' ')[1]
 
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        token = auth_header.split(' ')[1]
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -377,6 +350,49 @@ def get_conversations():
         
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        user_id = username
+        
+        data = request.json
+        message = {
+            "senderID": data["senderID"],
+            "receiverID": data["receiverID"],
+            "message": data["message"],
+            "timestamp": data["timestamp"]
+        }
+
+        db['messages'].insert_one(message)
+        return jsonify({"status": "Message sent"}), 201
+    except Exception as e:
+        logging.error(f'Unexpected error: {str(e)}')
+        logging.error(traceback.format_exc())
+        return jsonify({'message': 'An error occurred ', 'error': str(e)}), 500
+
+
+@app.route('/conversations', methods=['POST'])
+def get_conversations():
+    try:
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({"status": "error", "message": "Invalid token"}), 401
+
+        token = auth_header.split(' ')[1]
+        
+        username = get_username(token)
+
+        # Get stored Tapis token
+        session = db.sessions.find_one({"username": username})
+        if not session:
+            return jsonify({"status": "error", "message": "Session not found"}), 401
+
+        # Check if Tapis token is expired
+        expires_at = datetime.datetime.fromisoformat(session['tapis_token']['expires_at'])
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        
+        if now_utc > expires_at:
+            return jsonify({"status": "error", "message": "Tapis token expired"}), 401
+        
+        user_id = username
         
         sender_id = request.get_json().get("sender_id")
         print(sender_id)
@@ -424,13 +440,13 @@ def train():
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
-        token = auth_header.split(' ')[1]
 
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        token = auth_header.split(' ')[1]
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -440,8 +456,9 @@ def train():
         
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
-    
-        user_id = payload['username']
+        
+        user_id = username
+        
 
         data_received = request.get_json()  # Get the JSON data from the request body
         collaborators = [i['username'] for i in data_received.get('collaborators')]
@@ -497,13 +514,13 @@ def get_model_prediction():
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
-        token = auth_header.split(' ')[1]
 
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        token = auth_header.split(' ')[1]
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -513,8 +530,9 @@ def get_model_prediction():
         
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
-    
-        user_id = payload['username']
+        
+        user_id = username
+        
 
         model_info = request.get_json()['model_info']
         eval_data = request.get_json()['eval_data']
@@ -538,13 +556,13 @@ def get_public_models():
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
-        token = auth_header.split(' ')[1]
 
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        token = auth_header.split(' ')[1]
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -555,7 +573,8 @@ def get_public_models():
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
         
-        user_id = payload['username']
+        user_id = username
+        
         # Query the datasets collection for the user's datasets
         models = db['models'].find()
         # Remove modelWeights field from each model
@@ -577,13 +596,13 @@ def get_user_models():
         auth_header = request.headers.get('Authorization')
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
-        
-        token = auth_header.split(' ')[1]
 
-        payload = jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+        token = auth_header.split(' ')[1]
         
+        username = get_username(token)
+
         # Get stored Tapis token
-        session = db.sessions.find_one({"username": payload['username']})
+        session = db.sessions.find_one({"username": username})
         if not session:
             return jsonify({"status": "error", "message": "Session not found"}), 401
 
@@ -594,7 +613,8 @@ def get_user_models():
         if now_utc > expires_at:
             return jsonify({"status": "error", "message": "Tapis token expired"}), 401
         
-        user_id = payload['username']
+        user_id = username
+        
         # Query the datasets collection for the user's datasets
         models = db['models'][user_id].find()
         # Remove modelWeights field from each model
