@@ -15,8 +15,6 @@ from flask_socketio import SocketIO
 import json
 from bson import json_util
 
-# with open('config.yaml', 'r') as file:
-#     config = yaml.safe_load(file)
 
 from config import settings
 
@@ -332,6 +330,7 @@ def get_messages():
 def send_message():
     try:
         auth_header = request.headers.get('Authorization')
+        print(auth_header)
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
 
