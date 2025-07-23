@@ -16,7 +16,7 @@ import json
 from bson import json_util
 
 
-from config import settings
+from config import app_settings, auth_settings
 
 # Load environment variables
 load_dotenv()
@@ -26,30 +26,18 @@ CORS(app, resources={r"/*": {"origins": "*"}})  # Apply to all routes
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # MongoDB connection
-mongo_uri = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/digital_agriculture')
-REACT_APP_FARMER_API_URL = os.getenv('REACT_APP_FARMER_API_URL', 'http://localhost:5001')
-REACT_APP_PARAM_API_URL = os.getenv('REACT_APP_PARAM_API_URL', 'http://localhost:5002')
+# mongo_uri = os.getenv('MONGODB_URI', 'mongodb://mongodb:27017/digital_agriculture')
+# app_settings.sandbox_server_url = os.getenv('app_settings.sandbox_server_url', 'http://localhost:5001')
+# app_settings.param_server_url = os.getenv('app_settings.param_server_url', 'http://localhost:5002')
 
-client = MongoClient(mongo_uri)
+client = MongoClient(app_settings.mongodb_uri)
 db = client.digital_agriculture
 messages_collection = db['messages']
-
-# TACC Configuration
-JWT_SECRET = '6554a9038d6a07bbf3cb17973c13ce2c5f24a71c247210b1f2a8d04cfb8a6907a102064629058d7d89ed4d03a5503fa485e3898346f3baeef1ed510268e680f65d6d7ccaed5ca755586702e55142e1c07e53f5b38b7055b4bb55a70baf0dcdc0d4150347041a1509fc7d12d705ffe4c8e9ff9cb8f9bba5ffd6129128b62e84de4e9087d21d342a10d87a53c59eec2323dcf3a3d2276d62793df37c5e96eacbabc44f1ce1930e7e8ceb97c88f83d75d4fdcb2cebda1ceea7b99294c6d0c4db8fa71d2295b7b73f80813a734447983d47f430d0dddbd90c5ff81a35b46cad10cde33901456e3fe6f7166152366693224a072d7182b40c38bbf04c3ccf76ff3b6db'  # Change this in production
-
-def create_jwt_token(username):
-    """Create a JWT token for the authenticated user"""
-    payload = {
-        'username': username,
-        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=1)
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm='HS256')
 
 @app.route('/api/auth/login', methods=['GET'])
 def login():
     try:
-        tapis_url = f"{settings.tapis_base_url}/v3/oauth2/authorize?client_id={settings.client_id}&redirect_uri={settings.callback_url}&response_type=code"
-        # return redirect(tapis_url, code=302)
+        tapis_url = f"{auth_settings.tapis_base_url}/v3/oauth2/authorize?client_id={auth_settings.client_id}&redirect_uri={auth_settings.callback_url}&response_type=code"
         return redirect(tapis_url, code=302)
 
 
@@ -103,7 +91,7 @@ def get_username(token):
     """
     headers = {'Content-Type': 'text/html'}
     # call the userinfo endpoint
-    url = f"{settings.tapis_base_url}/v3/oauth2/userinfo"
+    url = f"{auth_settings.tapis_base_url}/v3/oauth2/userinfo"
     headers = {'X-Tapis-Token': token}
     try:
         rsp = requests.get(url, headers=headers)
@@ -125,14 +113,14 @@ def callback():
     code = request.args.get('code')
     if not code:
         raise Exception(f"Error: No code in request; debug: {request.args}")
-    url = f"{settings.tapis_base_url}/v3/oauth2/tokens"
+    url = f"{auth_settings.tapis_base_url}/v3/oauth2/tokens"
     data = {
         "code": code, 
-        "redirect_uri": settings.callback_url,
+        "redirect_uri": auth_settings.callback_url,
         "grant_type": "authorization_code",
     }
     try:
-        response = requests.post(url, data=data, auth=(settings.client_id, settings.client_key))
+        response = requests.post(url, data=data, auth=(auth_settings.client_id, auth_settings.client_key))
         print(response.text)
         response.raise_for_status()
         json_resp = json.loads(response.text)
@@ -160,41 +148,7 @@ def callback():
     except Exception as e:
         raise Exception(f"Error generating Tapis token; debug: {e}")
 
-    print(token)
-
-    # username = auth.get_username(token)
-
-    # tapis_token_info = {
-    #         'access_token': t.access_token.access_token,
-    #         'expires_at': t.access_token.expires_at.isoformat(),
-    #         'jti': t.access_token.jti,
-    #         'original_ttl': t.access_token.original_ttl
-    #     }
-
-    # # Store user session in MongoDB
-    # db.sessions.update_one(
-    #     {"username": username},
-    #     {
-    #         "$set": {
-    #             "username": username,
-    #             "tapis_token": tapis_token_info,
-    #             "last_login": datetime.datetime.utcnow()
-    #         }
-    #     },
-    #     upsert=True
-    #     )
-
-        # return jsonify({
-        #     "status": "success",
-        #     "token": token,
-        #     "username": username,
-        #     "tapis_token": tapis_token_info
-        # })
-    # current_app.logger.info(f"Got username for token; username: {username}")
-    # roles = auth.add_user_to_session(username, token)
-    # current_app.logger.info(f"Username added to session; found these roles: {roles}")
-    
-    return redirect(settings.app_base_url+"/?tapis_token="+str(token)+"&username="+str(username), code=302)
+    return redirect(auth_settings.app_base_url+"/?tapis_token="+str(token)+"&username="+str(username), code=302)
 
 
 @app.route('/api/get_similar_farmers', methods=['POST'])
@@ -224,7 +178,6 @@ def get_similar_farmers():
         
         data = request.get_json()  # Get the JSON data from the request body
         selected_DS_ID = data.get('selectedDataset')  # Extract selectedDataset
-        print("sad",selected_DS_ID)
 
         response = None
 
@@ -234,14 +187,14 @@ def get_similar_farmers():
                 "Content-Type": "application/json"
                 }
             
-            response = requests.get(f"{REACT_APP_FARMER_API_URL}/api/load_datasets", headers=headers, params={'datasetId' : selected_DS_ID})
+            response = requests.get(f"{app_settings.sandbox_server_url}/api/load_datasets", headers=headers, params={'datasetId' : selected_DS_ID})
         except requests.exceptions.RequestException as e:
             print(f"Error during request: {e}")
             return jsonify({"status": f"Error during request: {e}"}), 500
         
         protectedData = response.json()
         userNames = list(protectedData.keys())
-        print(userNames)
+
         initiator = userNames.index(user_id)
         clientX = [protectedData[user]['noisyX'] for user in userNames]
         clientY = [protectedData[user]['noisyY'] for user in userNames]
@@ -468,7 +421,7 @@ def train():
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json"
                     }
-        response = requests.get(f"{REACT_APP_FARMER_API_URL}/api/get_datasets_metadata", headers=headers, params={'datasetId' : hyperparameters['datasetName']})
+        response = requests.get(f"{app_settings.sandbox_server_url}/api/get_datasets_metadata", headers=headers, params={'datasetId' : hyperparameters['datasetName']})
         
         metadata = response.json()['metadata']
         num_classes = response.json()['num_classes']
@@ -495,7 +448,7 @@ def train():
 
         model_id = str(result.inserted_id)
 
-        response = requests.post(f"{REACT_APP_PARAM_API_URL}/api/start_training", headers=headers, json={'collaborators': collaborators, 'metadata': metadata, 'model_id' : model_id, "hyperparameters": hyperparameters})
+        response = requests.post(f"{app_settings.param_server_url}/api/start_training", headers=headers, json={'collaborators': collaborators, 'metadata': metadata, 'model_id' : model_id, "hyperparameters": hyperparameters})
         
         if response:
             print(response)
@@ -537,7 +490,7 @@ def get_model_prediction():
         eval_data = request.get_json()['eval_data']
         
         headers = {'Authorization': f'Bearer {token}'}
-        response = requests.post(f"{REACT_APP_FARMER_API_URL}/api/predict_eval", 
+        response = requests.post(f"{app_settings.sandbox_server_url}/api/predict_eval", 
                                 headers=headers, 
                                 json={'model_info': model_info, 'eval_data': eval_data})
         
@@ -679,6 +632,6 @@ def test():
     
     return jsonify(json.dumps('Done', default=str)), 200
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5003, debug=True) 
+    app.run(host=app_settings.host, port=app_settings.port, debug=app_settings.debug)
 
 
