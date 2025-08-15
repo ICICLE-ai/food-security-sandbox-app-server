@@ -6,6 +6,9 @@ class AuthSettings(BaseSettings):
     app_base_url: str
     tenant: str
     callback_url: str
+    class Config:
+        env_file: str = ".env"
+        extra = "ignore"
 
 class AppSettings(BaseSettings):
     host: str
@@ -14,6 +17,9 @@ class AppSettings(BaseSettings):
     param_server_url: str
     sandbox_server_url: str
     mongodb_uri: str
+    class Config:
+        env_file: str = ".env"
+        extra = "ignore"
 
 auth_settings = AuthSettings()
 app_settings = AppSettings()
