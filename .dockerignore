@@ -1,0 +1,74 @@
+# ──────────────────────────────────────────────────────────────────────────
+# ICICLE .dockerignore template
+# Keeps build context small and prevents secrets / junk from entering images.
+# ──────────────────────────────────────────────────────────────────────────
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Environments & secrets — NEVER bake these into images
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+.secrets/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# CI / local tooling output
+.github/
+dist/
+build/
+*.log
+logs/
+
+# Docker itself — don't recurse
+Dockerfile
+.dockerignore
+
+# Documentation (usually not needed in image)
+docs/
+*.md
+!README.md
+
+# Data / notebooks (opt-in if your service needs them)
+*.ipynb
+.ipynb_checkpoints/
+data/
+*.csv
+*.parquet
+*.h5
+*.hdf5

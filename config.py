@@ -11,9 +11,9 @@ class AuthSettings(BaseSettings):
         extra = "ignore"
 
 class AppSettings(BaseSettings):
-    host: str
-    port: int
-    debug: bool
+    host: str = "0.0.0.0"
+    port: int = 8000
+    debug: bool = False
     param_server_url: str
     sandbox_server_url: str
     mongodb_uri: str

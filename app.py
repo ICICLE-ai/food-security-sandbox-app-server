@@ -1,4 +1,6 @@
-from flask import Flask, jsonify, request, redirect
+import signal
+import sys
+from flask import Flask, jsonify, request, redirect, Response
 from flask_cors import CORS
 from pymongo import MongoClient
 import os
@@ -84,17 +86,26 @@ def verify_token():
 def health_check():
     return jsonify({"status": "healthy", "service": "app-server"})
 
-@app.route('/api/auth/get_username', methods=['GET'])
+# ICICLE CI rollout check: must stay outside /api and report the image's BUILD_SHA.
+@app.route('/health', methods=['GET'])
+def build_health():
+    response = jsonify({
+        "status": "ok",
+        "build_sha": os.getenv("BUILD_SHA", "unknown"),
+        "version": os.getenv("BUILD_VERSION", "unknown")
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 def get_username(token):
     """
     Validate a Tapis JWT, `token`, and resolve it to a username.
     """
-    headers = {'Content-Type': 'text/html'}
     # call the userinfo endpoint
     url = f"{auth_settings.tapis_base_url}/v3/oauth2/userinfo"
     headers = {'X-Tapis-Token': token}
     try:
-        rsp = requests.get(url, headers=headers)
+        rsp = requests.get(url, headers=headers, timeout=30)
         rsp.raise_for_status()
         username = rsp.json()['result']['username']
     except Exception as e:
@@ -120,8 +131,7 @@ def callback():
         "grant_type": "authorization_code",
     }
     try:
-        response = requests.post(url, data=data, auth=(auth_settings.client_id, auth_settings.client_key))
-        print(response.text)
+        response = requests.post(url, data=data, auth=(auth_settings.client_id, auth_settings.client_key), timeout=30)
         response.raise_for_status()
         json_resp = json.loads(response.text)
         token = json_resp['result']['access_token']['access_token']
@@ -226,7 +236,7 @@ def get_similar_farmers():
         logging.error(traceback.format_exc())
         return jsonify({'message': 'An error occurred while processing the file', 'error': str(e)}), 500
 
-@app.route("/getMessages", methods=["POST"])
+@app.route("/api/getMessages", methods=["POST"])
 def get_messages():
     try:
         auth_header = request.headers.get('Authorization')
@@ -251,7 +261,8 @@ def get_messages():
         
         user_id = username
         
-        sender_id = request.get_json().get("sender_id")
+        # The caller can only read their own conversations.
+        sender_id = user_id
         receiver_id = request.get_json().get("receiver_id")
         
         # Fetching messages from the database
@@ -279,11 +290,10 @@ def get_messages():
 
     return jsonify(messages_list)
 
-@app.route("/sendMessage", methods=["POST"])
+@app.route("/api/sendMessage", methods=["POST"])
 def send_message():
     try:
         auth_header = request.headers.get('Authorization')
-        print(auth_header)
         if not auth_header or not auth_header.startswith('Bearer '):
             return jsonify({"status": "error", "message": "Invalid token"}), 401
 
@@ -307,7 +317,8 @@ def send_message():
         
         data = request.json
         message = {
-            "senderID": data["senderID"],
+            # Messages are always sent as the authenticated user.
+            "senderID": user_id,
             "receiverID": data["receiverID"],
             "message": data["message"],
             "timestamp": data["timestamp"]
@@ -321,7 +332,7 @@ def send_message():
         return jsonify({'message': 'An error occurred ', 'error': str(e)}), 500
 
 
-@app.route('/conversations', methods=['POST'])
+@app.route('/api/conversations', methods=['POST'])
 def get_conversations():
     try:
         auth_header = request.headers.get('Authorization')
@@ -346,10 +357,8 @@ def get_conversations():
         
         user_id = username
         
-        sender_id = request.get_json().get("sender_id")
-        print(sender_id)
-        if not sender_id:
-            return jsonify({"error": "sender_id is required"}), 400
+        # The caller can only list their own conversations.
+        sender_id = user_id
 
         # Find all messages where user is either sender or receiver
         messages = db['messages'].find({
@@ -386,7 +395,7 @@ def get_conversations():
         logging.error(traceback.format_exc())
         return jsonify({"error": "Internal server error"}), 500
 
-@app.route('/train', methods=['POST'])
+@app.route('/api/train', methods=['POST'])
 def train():
     try:
         auth_header = request.headers.get('Authorization')
@@ -583,55 +592,48 @@ def get_user_models():
         return jsonify({'message': 'An error occurred while loading datasets', 'error': str(e)}), 500
     
 
-@app.route('/api/test', methods=['GET'])
-def test():
-    # Find all messages where user is either sender or receiver
-    collections = db['datasets']['osamazafar98'].find({})
-    documents_to_copy = list(collections.sort('_id', 1).skip(1))
+# The frontend only talks to this server (through its /api proxy), so the
+# farmer-server routes it uses are forwarded unchanged. The farmer-server
+# still authenticates every request with the caller's Tapis token.
+FARMER_SERVER_ROUTES = {
+    'get_user_datasets': ['GET'],
+    'delete_dataset': ['GET'],
+    'upload_csv': ['POST'],
+    'get_dataset_column_info': ['POST'],
+    'check_k_anonymity': ['POST'],
+    'export_dataset_columns': ['POST'],
+}
+FORWARDED_REQUEST_HEADERS = {'authorization', 'content-type', 'accept'}
+HOP_BY_HOP_RESPONSE_HEADERS = {'content-encoding', 'content-length', 'transfer-encoding', 'connection'}
 
-    if not documents_to_copy:
-        return jsonify({"status": "error", "message": "No documents found to copy (or only one document exists)."})
+def forward_to_farmer_server(route):
+    try:
+        response = requests.request(
+            request.method,
+            f"{app_settings.sandbox_server_url}/api/{route}",
+            params=request.args,
+            data=request.get_data(),
+            headers={k: v for k, v in request.headers.items() if k.lower() in FORWARDED_REQUEST_HEADERS},
+            timeout=300
+        )
+    except requests.exceptions.RequestException as e:
+        logging.error(f'Farmer server request failed: {str(e)}')
+        return jsonify({'message': 'Farmer server unavailable'}), 502
 
-    # Ensure we have exactly 4 documents if that's the strict requirement,
-    # or adjust if you want to copy all available documents after the first.
-    # For "last 4 documents", if source has 5, this should work.
-    # If source has less than 5, this will copy whatever is available after the first.
-    if len(documents_to_copy) < 4:
-        print(f"Warning: Found only {len(documents_to_copy)} documents to copy after skipping the first.")
-    
-    # Define the new collection names
-    new_collection_names = ['Test1', 'Test2', 'Test3', 'Test4']
-    
-    # This will hold status messages for each operation
-    results = {}
+    headers = [(k, v) for k, v in response.headers.items() if k.lower() not in HOP_BY_HOP_RESPONSE_HEADERS]
+    return Response(response.content, response.status_code, headers)
 
-    # Loop through the new collection names and the documents to copy
-    # We use zip to pair them up. If there are fewer than 4 documents to copy,
-    # zip will naturally stop at the shortest sequence.
-    for i, (new_name, doc) in enumerate(zip(new_collection_names, documents_to_copy)):
-        target_collection = db['datasets'][new_name] # Access the new collection (it will be created if it doesn't exist)
-        
-        # Remove the '_id' field from the document to be inserted.
-        # MongoDB automatically generates a new unique _id for each new insertion,
-        # preventing 'DuplicateKeyError' if the original _id were kept.
-        if '_id' in doc:
-            del doc['_id']
-        
-        try:
-            inserted_result = target_collection.insert_one(doc)
-            results[new_name] = {
-                "status": "success",
-                "inserted_id": str(inserted_result.inserted_id),
-                "message": f"Document copied to {new_name}"
-            }
-        except Exception as e:
-            results[new_name] = {
-                "status": "error",
-                "message": f"Failed to insert document into {new_name}: {str(e)}"
-            }
-    
-    return jsonify(json.dumps('Done', default=str)), 200
+for route, methods in FARMER_SERVER_ROUTES.items():
+    app.add_url_rule(
+        f'/api/{route}',
+        endpoint=f'farmer_{route}',
+        view_func=lambda route=route: forward_to_farmer_server(route),
+        methods=methods
+    )
+
 if __name__ == '__main__':
+    # Exit cleanly on SIGTERM: as PID 1 in the pod the default action is to ignore it.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     app.run(host=app_settings.host, port=app_settings.port, debug=app_settings.debug)
 
 

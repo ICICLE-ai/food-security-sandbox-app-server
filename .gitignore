@@ -1,0 +1,5 @@
+# Copied in by CI from icicle-ai/cicd-templates at build time (or by scripts/fetch-ci-templates.sh locally).
+Dockerfile
+.env
+.venv/
+__pycache__/
