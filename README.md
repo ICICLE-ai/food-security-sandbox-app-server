@@ -31,7 +31,7 @@ Dependencies are locked with uv: after changing `pyproject.toml`, run `uv lock` 
 
 ## Deployment
 
-Deployed to the existing `fssback` Tapis pod (image `ghcr.io/icicle-ai/food-security-sandbox-backend`) by `.github/workflows/deploy.yaml`, using the shared
-[ICICLE CI/CD templates](https://github.com/ICICLE-ai/cicd-templates/wiki/Quick-start) (`v2.2.1`).
+Deployed to the `fssback` Tapis pod (image `ghcr.io/icicle-ai/fssback`) by `.github/workflows/deploy.yaml`, using the shared
+[ICICLE CI/CD templates](https://github.com/ICICLE-ai/cicd-templates/wiki/Quick-start) (`v2.3.0`).
 Bump `service-version` in `icicle-service.yaml` and push to `main` to release.
 CI checks the rollout through `GET /health`.

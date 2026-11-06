@@ -1,12 +1,9 @@
-# ICICLE CI/CD config (cicd-templates v2.2.1): https://github.com/ICICLE-ai/cicd-templates/wiki/Quick-start
+# ICICLE CI/CD config (cicd-templates v2.3.0): https://github.com/ICICLE-ai/cicd-templates/wiki/Quick-start
 # Food Security Sandbox - app server (auth, chat, models, farmer-server gateway)
-# Schema 1: deploys to an existing pod whose ID differs from its image name.
-schema-version: 1
-# Image repository already approved for the pod: ghcr.io/icicle-ai/<service-name>.
-service-name: food-security-sandbox-backend
-# Existing Tapis pod this service deploys to.
-pod-name: fssback
-# Becomes the image tag (ghcr.io/icicle-ai/food-security-sandbox-backend:<version>). Bump for every deployable build.
+schema-version: 3
+# Image name AND Tapis pod ID (ghcr.io/icicle-ai/fssback, pod fssback).
+service-name: fssback
+# Becomes the image tag. Bump for every deployable build.
 service-version: 1.0.0
 project-name: food-security-sandbox
 service-type: domain
