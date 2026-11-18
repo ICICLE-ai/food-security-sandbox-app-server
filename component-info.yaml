@@ -1,0 +1,21 @@
+- id: "FoodSecuritySandboxAppServer:1.0.0"
+  owner: "Osama Zafar"
+  primaryThrust: "useInspired/SF"
+  name: "Food Security Sandbox App Server"
+  status: "AlphaRelease"
+  description: "Tapis OAuth login, chat, the model registry, similar-farmer matching and training requests. It is the only backend the frontend calls: it also forwards the frontend's dataset routes to the farmer server. Part of Food Security Sandbox, a collaborative machine learning platform where farmers and researchers analyze agricultural data and train models together with privacy-preserving features."
+  componentVersion: "1.0.0"
+  targetIcicleRelease: "2026-11"
+  hasDependentComponents:
+    - related_to: "FoodSecuritySandboxFarmerServer:1.0.0"
+      relationship_type: "DependsOn"
+    - related_to: "FoodSecuritySandboxParamServer:1.0.0"
+      relationship_type: "DependsOn"
+  licenseUrl: "https://github.com/ICICLE-ai/food-security-sandbox-app-server?tab=BSD-3-Clause-1-ov-file"
+  publicAccess: true
+  sourceCodeUrl: "https://github.com/ICICLE-ai/food-security-sandbox-app-server"
+  codeReviewConducted: false
+  testsWritten: false
+  developerDocumentationAvailable: true
+  developerDocumentationUrl: "https://github.com/ICICLE-ai/food-security-sandbox-app-server#readme"
+  trainingTutorialsAvailable: false
